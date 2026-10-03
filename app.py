@@ -80,13 +80,14 @@ WEATHER_DIRECTIONS = ('N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def calculate_qra(storage_wan_tons, alpha, beta, critical_tons, consequence_factor):
-    storage_tons = storage_wan_tons * 10000
-    risk_value = alpha * beta * storage_tons / critical_tons
-    storage_range = np.linspace(max(0.1, storage_wan_tons * 0.25),
-                                max(10.0, storage_wan_tons * 2.0), 120)
-    risk_range = alpha * beta * storage_range * 10000 / critical_tons
-    scale = np.sqrt(storage_wan_tons / 4.3) * consequence_factor
+def calculate_qra(selected_tank_storage_wan_tons, alpha, beta, critical_quantity_tons,
+                  consequence_factor):
+    q_tons = selected_tank_storage_wan_tons * 10000
+    risk_value = alpha * beta * (q_tons / critical_quantity_tons)
+    storage_range = np.linspace(max(0.1, selected_tank_storage_wan_tons * 0.25),
+                                max(10.0, selected_tank_storage_wan_tons * 2.0), 120)
+    risk_range = alpha * beta * ((storage_range * 10000) / critical_quantity_tons)
+    scale = np.sqrt(selected_tank_storage_wan_tons / 4.3) * consequence_factor
     base_radii = np.array([
         [200, 120, 30, 60, 30, 10],
         [240, 140, 40, 70, 40, 10],
@@ -288,10 +289,26 @@ def calculate_resilience(recommended_measures):
 
 @st.cache_data(show_spinner=False, max_entries=128)
 def calculate_recovery_curve(initial_before, initial_after, days_before, days_after):
-    horizon = max(days_before, days_after) * 1.35 + 1
-    days = np.linspace(0, horizon, 160)
-    before_curve = 100 - initial_before * 100 * np.exp(-3 * days / max(days_before, 0.1))
-    after_curve = 100 - initial_after * 100 * np.exp(-3 * days / max(days_after, 0.1))
+    before_duration = max(days_before, 0.1)
+    after_duration = max(days_after, 0.1)
+    horizon = max(before_duration, after_duration) * 1.35 + 1
+    sample_days = np.unique(np.concatenate((
+        np.linspace(0, horizon, 160),
+        [0.2 * before_duration, 0.2 * after_duration, before_duration, after_duration],
+    )))
+    days = np.concatenate(([0.0], sample_days))
+
+    def build_curve(loss, duration):
+        recovery_start = 0.2 * duration
+        progress = np.clip((days - recovery_start) / (duration - recovery_start), 0, 1)
+        recovery_fraction = progress ** 2 * (3 - 2 * progress)
+        ability = 100 * (1 - loss + loss * recovery_fraction)
+        ability[days >= duration] = 100.0
+        ability[0] = 100.0
+        return ability
+
+    before_curve = build_curve(initial_before, before_duration)
+    after_curve = build_curve(initial_after, after_duration)
     return days, before_curve, after_curve
 
 
@@ -855,16 +872,21 @@ def render_sources(sources):
 
 
 def render_process_flow(steps):
-    flow_columns = st.columns(4)
-    for index, ((title, description), column) in enumerate(zip(steps, flow_columns)):
-        with column:
-            with st.container(border=True):
-                arrow = " →" if index < len(steps) - 1 else ""
-                st.markdown(
-                    f'<div class="process-flow-title">{title}<span class="process-flow-arrow">{arrow}</span></div>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(description)
+    with st.container(key=f"process_flow_{steps[0][1]}"):
+        flow_columns = st.columns(
+            [2, 0.3, 2, 0.3, 2, 0.3, 2],
+            gap="small",
+            vertical_alignment="center",
+            wrap=False,
+        )
+        for index, (title, description) in enumerate(steps):
+            with flow_columns[index * 2]:
+                with st.container(border=True):
+                    st.markdown(f"**{title}**")
+                    st.caption(description)
+            if index < len(steps) - 1:
+                with flow_columns[index * 2 + 1]:
+                    st.markdown("### →")
 
 
 def label_bar_values(axis, bars, fmt='%.0f', fontsize=8):
@@ -930,8 +952,8 @@ st.markdown(
     .system-subtitle {color: #475569; font-size: 0.95rem; margin: 0; line-height: 1.5;}
     [data-testid="stHorizontalBlock"] {gap: 0.75rem; align-items: stretch;}
     [data-testid="stHorizontalBlock"] > [data-testid="column"] {min-width: 0;}
-    .process-flow-title {color: #163B65; font-size: 1rem; font-weight: 700; line-height: 1.35; min-height: 1.35rem;}
-    .process-flow-arrow {float: right; color: #71879C; font-size: 1.2rem; line-height: 1;}
+    [class*="st-key-process_flow_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(even) {min-width: 2rem !important;}
+    [class*="st-key-process_flow_"] [data-testid="stColumn"]:nth-child(even) h3 {text-align: center; padding: 0;}
     [data-testid="stMetric"] {border: 1px solid #D7E0E8; border-top: 3px solid #163B65; border-radius: 3px; padding: 0.7rem 0.8rem; background: #FFFFFF; min-width: 0; min-height: 5.3rem; height: auto; overflow: visible;}
     [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] *, [data-testid="stMetricValue"], [data-testid="stMetricValue"] * {min-width: 0; white-space: normal !important; overflow: visible !important; text-overflow: clip !important; overflow-wrap: anywhere !important; word-break: break-word;}
     [data-testid="stMetricValue"] {line-height: 1.25; font-size: 1.2rem;}
@@ -1003,11 +1025,15 @@ with st.sidebar:
     st.header("决策参数")
     st.caption("修改参数后，风险、韧性和推荐措施组合会同步更新。")
     with st.expander("QRA 风险参数", expanded=False):
-        st.caption("储量 0.1-20 万吨；校正系数 0.1-5；临界量 1-2,000 吨。")
-        q_storage = st.number_input("汽油储量（万吨）", min_value=0.5, max_value=20.0, value=4.0, step=0.5)
-        alpha = st.number_input("暴露人员校正系数 α", min_value=0.1, max_value=5.0, value=2.0, step=0.1)
+        st.caption("储量 0.5-20 万吨；校正系数 0.1-5；临界量 1-2,000 吨。")
+        q_storage = st.number_input("介质储量（万吨）", min_value=0.5, max_value=20.0, value=4.0, step=0.5)
+        st.caption("不同介质对应不同校正系数β，请根据实际介质手动调整β值。")
+        alpha = st.number_input("厂外暴露人员校正系数 α", min_value=0.1, max_value=5.0, value=2.0, step=0.1)
         beta = st.number_input("危险化学品校正系数 β", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-        critical_quantity = st.number_input("临界量 Q（吨）", min_value=1.0, max_value=2000.0, value=200.0, step=10.0)
+        critical_quantity = st.number_input(
+            "临界量 Q（吨）", min_value=1.0, max_value=2000.0, value=200.0, step=10.0,
+            help="Q 为该介质的临界量（吨），请根据实际介质及适用标准填写。",
+        )
         consequence_factor = st.number_input("后果情景修正系数（倍）", min_value=0.5, max_value=1.5, value=1.0, step=0.1)
     with st.expander("组合优化参数", expanded=False):
         st.caption("枚举全部 32 种措施组合；超出预算的组合不参与推荐排序。")
@@ -1164,8 +1190,20 @@ with st.container(key="page_qra"):
         ("输出", "R 值敏感性、后果柱状图"),
         ("结论", "风险等级、重点泄漏模式"),
     ))
-    render_module_description("根据储量、人员暴露和危险化学品校正系数计算风险指标 R，并展示储量敏感性及典型泄漏后果半径。")
-    render_method("简化 QRA 风险指标", "采用 R=αβ(Q/Qcritical) 识别风险等级；后果半径以典型泄漏数据为基准，并按储量与情景修正系数校正。")
+    render_module_description("根据选定储罐的介质储量、厂外人员暴露和危险化学品校正系数计算风险指标 R，并展示储量敏感性及典型泄漏后果半径。")
+    render_method("简化 QRA 风险指标", "采用 R = αβ(q/Q) 识别风险等级；后果半径以典型泄漏数据为基准，并按储量与情景修正系数校正。")
+    with project_details_container:
+        st.markdown(r"**风险公式：** $R = \alpha\beta(q/Q)$")
+        st.caption("系统以选定储罐的泄漏事故为分析情景，其中 q 为该储罐的实际储量，Q 为对应介质的临界量。")
+        st.markdown(
+            "**参数定义**\n\n"
+            "- R：风险指标\n"
+            "- α：厂外暴露人员校正系数\n"
+            "- β：危险化学品校正系数\n"
+            "- q：选定储罐的实际储量（吨）\n"
+            "- Q：该介质的临界量（吨）"
+        )
+        st.caption("介质储量输入以万吨计，计算前换算为吨；q 与 Q 使用相同单位。")
     risk_columns = st.columns(2)
     risk_columns[0].metric("当前 R 值", f"{qra_result['risk_value']:.1f}")
     risk_columns[1].metric("风险等级", qra_result['risk_level'])
@@ -1180,7 +1218,7 @@ with st.container(key="page_qra"):
     ax1.annotate(f"R={qra_result['risk_value']:.0f}", xy=(q_storage, qra_result['risk_value']),
                  xytext=(0, 10), textcoords='offset points', ha='center', va='bottom',
                  fontsize=9, fontweight='bold', color=NAVY)
-    ax1.set_xlabel('汽油储量（万吨）')
+    ax1.set_xlabel('介质储量（万吨）')
     ax1.set_ylabel('R 值')
     ax1.set_title('储量变化下的 R 值敏感性')
     ax1.grid(True, alpha=0.28)
@@ -1288,19 +1326,45 @@ with st.container(key="page_resilience"):
         plt.close(fig3)
     with recovery_column:
         st.subheader(f'{selected_scenario}情景恢复曲线')
-        fig4, ax4 = plt.subplots(figsize=(6.8, 4.8))
+        st.caption("关键点标注对应改造后曲线；C 点按恢复时间的 20% 设置为示意恢复起点，并非实测拐点。")
+        fig4, ax4 = plt.subplots(figsize=(8.8, 6.8))
         ax4.plot(recovery_days, before_ability, color=STEEL, linewidth=2.0, linestyle=':', label='改造前')
         ax4.plot(recovery_days, after_ability, color=NAVY, linewidth=2.7, label='改造后')
-        ax4.axhline(100, color=SLATE, linestyle='--', linewidth=1.1, label='正常作业基线')
+        ax4.axhline(100, color=SLATE, linestyle='--', linewidth=1.1, label='正常作业基线（100%）')
+        recovery_duration = max(float(resilience_result['recovery_after'][scenario_index]), 0.1)
+        recovery_start = 0.2 * recovery_duration
+        minimum_ability = float(after_ability[1])
+        key_points = (
+            ('A', (0.0, 100.0), (0.02, 1.42), '事故瞬间', '吸收能力：系统承受冲击的起点', '#2E6F69'),
+            ('B', (0.0, minimum_ability), (0.02, -0.43), '最低点', '适应能力：系统承压极限', '#B8860B'),
+            ('C', (recovery_start, minimum_ability), (0.60, -0.43), '恢复拐点', '适应能力：系统开始恢复', BLUE),
+            ('D', (recovery_duration, 100.0), (0.60, 1.42), '恢复至基线', '恢复能力：恢复至正常作业水平', NAVY),
+        )
+        for point_code, coordinates, label_position, point_name, description, point_color in key_points:
+            ax4.scatter(*coordinates, s=65, color=point_color, edgecolor=WHITE, linewidth=1.1, zorder=6)
+            ax4.annotate(
+                f'{point_code}点：{point_name}\n{description}',
+                xy=coordinates,
+                xytext=label_position,
+                textcoords='axes fraction',
+                ha='left',
+                va='top' if point_code in ('A', 'D') else 'bottom',
+                fontsize=12,
+                color=point_color,
+                bbox=dict(boxstyle='round,pad=0.4', facecolor=WHITE, edgecolor=point_color, alpha=0.96),
+                arrowprops=dict(arrowstyle='->', color=point_color, linewidth=1.1),
+                annotation_clip=False,
+            )
         ax4.set_xlabel('事故后时间（天）')
         ax4.set_ylabel('安全作业能力（%）')
         ax4.set_ylim(0, 108)
-        ax4.set_title(f'{selected_scenario}情景安全作业能力恢复过程')
+        ax4.set_xlim(-0.04 * recovery_days[-1], recovery_days[-1])
         ax4.grid(True, alpha=0.28)
-        fig4.legend(loc='lower center', bbox_to_anchor=(0.5, 0.01), ncol=3, frameon=False, fontsize=8)
-        fig4.subplots_adjust(top=0.89, bottom=0.23, left=0.12, right=0.97)
+        fig4.legend(loc='lower center', bbox_to_anchor=(0.5, 0.01), ncol=3, frameon=False, fontsize=9)
+        fig4.subplots_adjust(top=0.73, bottom=0.35, left=0.12, right=0.97)
         st.pyplot(fig4)
         plt.close(fig4)
+        st.caption("恢复曲线标注了四个关键点：A点体现吸收能力（冲击起点），B点和C点体现适应能力（承压极限与恢复拐点），D点体现恢复能力（恢复至基线）。三个维度在一条曲线上完整呈现。")
     st.markdown(
         f"<div class='conclusion-note'><strong>韧性结论：</strong>在{selected_scenario}情景下，所选组合使事故后的安全作业能力损失减少，"
         f"恢复时间由 {resilience_result['recovery_before'][scenario_index]:.1f} 天缩短至 "
