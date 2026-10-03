@@ -29,6 +29,9 @@ plt.rcParams.update({
     'grid.color': BORDER,
 })
 
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'Microsoft YaHei', 'SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
 st.set_page_config(page_title="罐区安全-绿色协同改造决策支持系统", layout="wide")
 
 MEASURE_LIBRARY = (
