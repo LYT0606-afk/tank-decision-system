@@ -1,0 +1,6 @@
+# 罐区决策系统 运行时依赖（自包含包：环境可重建，不依赖任何既有虚拟环境）
+streamlit>=1.45
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+plotly>=5.24
