@@ -1,3 +1,5 @@
+from xml.etree import ElementTree
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -126,8 +128,7 @@ def calculate_weather_conditions():
     }
 
 
-@st.cache_data(show_spinner=False, max_entries=128)
-def calculate_entropy_weights(values):
+def calculate_entropy_details(values):
     matrix = np.asarray(values, dtype=float)
     proportions = matrix / np.maximum(matrix.sum(axis=0, keepdims=True), 1e-12)
     indicator_count = matrix.shape[0]
@@ -135,8 +136,21 @@ def calculate_entropy_weights(values):
     entropy = -entropy_constant * np.sum(proportions * np.log(np.maximum(proportions, 1e-12)), axis=0)
     divergence = 1 - entropy
     if divergence.sum() <= 1e-12:
-        return np.full(matrix.shape[1], 1 / matrix.shape[1])
-    return divergence / divergence.sum()
+        weights = np.full(matrix.shape[1], 1 / matrix.shape[1])
+    else:
+        weights = divergence / divergence.sum()
+    return {
+        'sample_count': indicator_count,
+        'proportions': proportions,
+        'entropy': entropy,
+        'divergence': divergence,
+        'weights': weights,
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def calculate_entropy_weights(values):
+    return calculate_entropy_details(values)['weights']
 
 
 def calculate_plan_effect(measure_names):
@@ -893,6 +907,64 @@ def label_bar_values(axis, bars, fmt='%.0f', fontsize=8):
     axis.bar_label(bars, fmt=fmt, padding=3, fontsize=fontsize, color=SLATE)
 
 
+def render_resilience_logic(result):
+    matrix = np.vstack([result['before_matrix'], result['after_matrix']])
+    details = calculate_entropy_details(matrix)
+    indicator_rows = (
+        ('吸收能力', '设备完整率', '正向', '完好关键设备数 / 关键设备总数', '设备台账、检查记录'),
+        ('吸收能力', '初始功能保持率', '正向', '冲击后初始作业能力 / 事故前作业能力', '监测记录、事故或演练记录'),
+        ('吸收能力', '隔离切断响应时间', '逆向', '从事故识别到有效隔离切断的时间', '报警与切断日志'),
+        ('适应能力', '监测预警及时率', '正向', '规定时间内有效预警次数 / 应预警事件数', '监测报警记录'),
+        ('适应能力', '关键作业维持率', '正向', '冲击期间可维持的关键作业量 / 正常关键作业量', '作业记录、演练记录'),
+        ('适应能力', '应急资源调配时间', '逆向', '从资源需求确认到资源到位的时间', '应急调度与演练记录'),
+        ('恢复能力', '恢复至基线时间', '逆向', '从事故发生到恢复正常作业水平的时间', '处置与恢复记录'),
+        ('恢复能力', '修复任务完成率', '正向', '评价时点已完成的必要修复任务数 / 必要修复任务总数', '维修计划、任务验收记录'),
+        ('恢复能力', '恢复验证合格率', '正向', '恢复后验证合格项目数 / 应验证项目数', '复工检查、验证记录'),
+    )
+    indicator_frame = pd.DataFrame(indicator_rows, columns=('能力维度', '候选底层指标', '指标方向', '示例测量口径', '所需资料'))
+    indicator_frame.insert(0, '指标编号', [f'C{index}' for index in range(1, len(indicator_rows) + 1)])
+    indicator_frame.insert(1, '指标类别', ['设施防护'] * 3 + ['监测预警'] + ['应急组织'] * 2 + ['修复重启'] * 3)
+    with st.container(key="resilience_logic"):
+        st.subheader("三维能力的指标体系与评价链路")
+        st.markdown("**当前实际计算链路：** 预设情景三维得分与措施系数 → 改造前后样本矩阵 → 列占比 → 信息熵 → 差异系数 → 熵权 → 综合韧性得分。")
+        st.caption("雷达图展示三维得分；综合指标展示熵权加权得分；恢复曲线由情景损失率和恢复天数生成。")
+        st.markdown("**客观赋权的依据：** 某一维度在评价样本中的分布越不均匀，信息熵越低、差异系数越大，获得的权重越高。权重来自数据的区分度，不由用户手动指定，也不等于该维度在所有项目中都更重要。")
+        st.caption(f"当前采用 {len(result['scenarios'])} 种情景的改造前、改造后得分，共 {details['sample_count']} 个样本；三个维度均使用 0–10 分，且分数越高表示能力越强。")
+        st.caption("以下为候选底层指标体系（未来扩展方向），当前版本尚未接入评分。")
+        with st.expander("底层指标口径（候选体系）", expanded=False):
+            st.dataframe(indicator_frame, hide_index=True)
+            st.caption("正向指标越高越好，逆向指标越低越好。上述划分为讨论用示例，并非已核验的文献结论；正式采用前需确认文献出处、阈值、评价时点、缺失值处理与维度内汇总规则。")
+        with st.expander("熵权计算依据与样本矩阵", expanded=False):
+            st.markdown(
+                r'<span class="notranslate" translate="no">**列占比：** $p_{ij}=\frac{x_{ij}}{\sum_{k=1}^{n}x_{kj}}$</span>' "\n\n"
+                r'<span class="notranslate" translate="no">**信息熵：** $e_j=-\frac{1}{\ln(n)}\sum_{i=1}^{n}p_{ij}\ln(p_{ij})$</span>' "\n\n"
+                r'<span class="notranslate" translate="no">**差异系数与权重：** $d_j=1-e_j,\quad w_j=\frac{d_j}{\sum_{\ell=1}^{m}d_{\ell}}$</span>' "\n\n"
+                r'<span class="notranslate" translate="no">**综合得分：** $S_i=\sum_{j=1}^{m}w_jx_{ij}$</span>',
+                unsafe_allow_html=True,
+            )
+            st.caption(f"i、k 表示评价样本，j、ℓ 表示能力维度；n 为样本数（当前 {details['sample_count']}），m 为维度数（当前 {matrix.shape[1]}）。ln 表示自然对数，0·ln(0) 按 0 处理。各维度差异系数均接近 0 时采用等权。")
+            sample_frame = pd.DataFrame(matrix, columns=result['dimensions'])
+            sample_frame.insert(0, '评价样本', [
+                f'{scenario} · {phase}'
+                for phase in ('改造前', '改造后')
+                for scenario in result['scenarios']
+            ])
+            st.dataframe(sample_frame.round(4), hide_index=True)
+            st.markdown("**当前得分来源：** 改造前使用预设的情景三维得分并按冲击系数修正；改造后用固定措施效果系数推演，不是由上表九项底层指标直接计算。当前只对三维得分按列计算占比，尚未对候选原始指标做方向统一与标准化。")
+            st.markdown("**客观性的边界：** 熵权由当前样本自动计算，但指标选择、情景初始得分、措施效果系数仍含模型设定。样本或措施改变时权重也会改变；数据区分度不能替代数据质量和工程有效性验证。")
+            st.caption("恢复曲线依据情景损失率与恢复时间生成，关键点用于解释三种能力，不是从综合韧性得分反推的实测轨迹。")
+        weight_frame = pd.DataFrame({
+            '韧性维度': result['dimensions'],
+            '信息熵 e_j': np.round(details['entropy'], 6),
+            '差异系数 d_j': np.round(details['divergence'], 6),
+            '熵权': np.round(result['weights'], 4),
+            '权重占比': [f"{weight:.1%}" for weight in result['weights']],
+        })
+        st.subheader("熵权结果")
+        st.dataframe(weight_frame, hide_index=True)
+    return details
+
+
 def build_report(qra_result, resilience_result, scenario_name, scenario_index, selected_plan, recommended_plan, budget):
     improvement = ((resilience_result['after_scores'][scenario_index]
                     - resilience_result['before_scores'][scenario_index])
@@ -1263,7 +1335,7 @@ with st.container(key="page_resilience"):
         ("结论", "恢复短板、改造重点"),
     ))
     render_module_description("围绕韧性三角的吸收、适应、恢复能力，在三类常规泄漏和两类非常规冲击下比较改造前后的综合韧性和安全作业能力恢复过程。")
-    render_method("熵权法 + 韧性三角理论", "熵权法依据指标在各情景与方案中的离散程度确定客观权重；安全作业能力以事故时刻的骤降和随后恢复至基线的过程表示。")
+    render_method("熵权法 + 韧性三角理论", "当前按五种情景的改造前后预设三维得分计算熵权，权重由列占比分布的信息熵与差异系数决定；底层指标体系为待接入的候选示例，恢复曲线依据情景损失率与恢复时间生成。")
     selected_scenario = st.selectbox(
         "事故情景选择",
         tuple(SCENARIO_LIBRARY.keys()),
@@ -1284,13 +1356,7 @@ with st.container(key="page_resilience"):
     resilience_columns[2].metric("改造后韧性", f"{resilience_result['after_scores'][scenario_index]:.2f} / 10")
     resilience_columns[3].metric("提升幅度", f"{resilience_improvement:.1f}%")
 
-    weight_frame = pd.DataFrame({
-        '韧性维度': resilience_result['dimensions'],
-        '熵权': np.round(resilience_result['weights'], 4),
-        '权重占比': [f"{weight:.1%}" for weight in resilience_result['weights']],
-    })
-    st.subheader("熵权结果")
-    st.dataframe(weight_frame, hide_index=True)
+    render_resilience_logic(resilience_result)
 
     radar_column, recovery_column = st.columns((1, 1.1))
     with radar_column:
@@ -1372,7 +1438,8 @@ with st.container(key="page_resilience"):
         unsafe_allow_html=True,
     )
     render_sources((
-        "吸收、适应、恢复指标由事故隔离能力、监测响应能力、应急资源与恢复组织能力等现场数据归一化形成。",
+        "当前三维得分来自预设脱敏情景参数与固定措施效果系数，并非现场底层指标实测值。",
+        "候选底层指标为讨论用示例；接入正式评价前需依据核验文献、现场台账、监测与演练记录确认指标体系和评分规则。",
         "事故情景、恢复时间和安全作业能力曲线应结合演练记录、应急预案和历史处置数据校核。",
         "蓄意冲击与随机冲击的强度系数、恢复时间为非常规事件研究用脱敏情景参数，不对应真实事件或企业。",
     ))
